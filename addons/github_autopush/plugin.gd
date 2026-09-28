@@ -4,78 +4,66 @@ extends EditorPlugin
 const SETTINGS_PATH := "user://github_autopush.cfg"
 const MENU_NAME := "GitHub AutoPush: Configura..."
 const MENU_PUSH_NAME := "GitHub AutoPush: Carica adesso"
+const BUTTON_TEXT := "Push e chiudi"
 
 var repo_url := ""
 var branch := "main"
 var commit_message := "Auto-commit da Godot"
-var ask_on_close := true
 
-var _ask_dialog: ConfirmationDialog
+var _push_button: Button
 var _settings_dialog: ConfirmationDialog
 var _result_dialog: AcceptDialog
 var _repo_edit: LineEdit
 var _branch_edit: LineEdit
 var _msg_edit: LineEdit
-var _ask_check: CheckBox
-var _closing_confirmed := false
 
 
 func _enter_tree() -> void:
 	_load_settings()
-	_build_ask_dialog()
 	_build_settings_dialog()
 	_build_result_dialog()
+	_build_push_button()
 	add_tool_menu_item(MENU_NAME, _open_settings)
 	add_tool_menu_item(MENU_PUSH_NAME, _push_now_from_menu)
-	get_tree().set_auto_accept_quit(false)
-	var win := EditorInterface.get_base_control().get_window()
-	if not win.close_requested.is_connected(_on_close_requested):
-		win.close_requested.connect(_on_close_requested)
 	print("[GitHub AutoPush] attivo, repo: ", repo_url if repo_url != "" else "(non configurato)")
 
 
 func _exit_tree() -> void:
-	var win := EditorInterface.get_base_control().get_window()
-	if win.close_requested.is_connected(_on_close_requested):
-		win.close_requested.disconnect(_on_close_requested)
+	if is_instance_valid(_push_button):
+		_push_button.get_parent().remove_child(_push_button)
+		_push_button.queue_free()
 	remove_tool_menu_item(MENU_NAME)
 	remove_tool_menu_item(MENU_PUSH_NAME)
-	get_tree().set_auto_accept_quit(true)
-	for d in [_ask_dialog, _settings_dialog, _result_dialog]:
+	for d in [_settings_dialog, _result_dialog]:
 		if is_instance_valid(d):
 			d.queue_free()
 
 
 # ---------------------------------------------------------------- chiusura --
 
-func _on_close_requested() -> void:
-	print("[GitHub AutoPush] chiusura intercettata")
-	if _closing_confirmed or not ask_on_close or repo_url.strip_edges() == "":
-		_quit_now()
-		return
-	_ask_dialog.popup_centered()
-
-
 func _quit_now() -> void:
-	_closing_confirmed = true
-	get_tree().set_auto_accept_quit(true)
 	get_tree().quit()
 
 
-func _on_ask_confirmed() -> void:
+func _on_push_and_close_pressed() -> void:
+	if repo_url.strip_edges() == "":
+		_result_dialog.title = "GitHub AutoPush"
+		_result_dialog.dialog_text = "Repository non configurato.\nUsa Progetto > Strumenti > GitHub AutoPush: Configura..."
+		_result_dialog.popup_centered(Vector2i(600, 250))
+		return
+	_push_button.disabled = true
+	_push_button.text = "Push in corso..."
+	# lascio un frame per aggiornare il testo del pulsante
+	await get_tree().process_frame
 	var res := _do_push()
+	_push_button.disabled = false
+	_push_button.text = BUTTON_TEXT
 	if res.ok:
 		_quit_now()
 	else:
-		# Push fallito: non chiudo in automatico, mostro l'errore
-		_result_dialog.title = "Push fallito"
-		_result_dialog.dialog_text = res.message + "\n\nL'editor NON e' stato chiuso. Riprova la chiusura per uscire comunque."
-		_closing_confirmed = true  # alla prossima chiusura esce senza richiedere
-		_result_dialog.popup_centered(Vector2i(600, 300))
-
-
-func _on_ask_canceled() -> void:
-	_quit_now()
+		_result_dialog.title = "Push fallito - l'editor NON e' stato chiuso"
+		_result_dialog.dialog_text = res.message
+		_result_dialog.popup_centered(Vector2i(650, 350))
 
 
 # --------------------------------------------------------------------- git --
@@ -142,6 +130,13 @@ func _do_push() -> Dictionary:
 	if commit.code != 0 and not ("nothing to commit" in commit.out or "nulla da committare" in commit.out):
 		return {"ok": false, "message": "git commit fallito:\n" + commit.out}
 
+	# se il remoto ha gia' commit (es. README iniziale) li unisco prima del push
+	var fetch := _git(PackedStringArray(["fetch", "origin", branch]))
+	if fetch.code == 0:
+		var pull := _git(PackedStringArray(["pull", "origin", branch, "--allow-unrelated-histories", "--no-edit", "--no-rebase"]))
+		if pull.code != 0:
+			return {"ok": false, "message": "git pull fallito (probabile conflitto):\n" + pull.out + "\n\nRisolvi il conflitto da terminale nella cartella del progetto, poi riprova."}
+
 	var push := _git(PackedStringArray(["push", "-u", "origin", branch]))
 	if push.code != 0:
 		return {"ok": false, "message": "git push fallito:\n" + push.out + "\n\nControlla URL del repo e credenziali (SSH key o credential manager)."}
@@ -158,15 +153,15 @@ func _push_now_from_menu() -> void:
 
 # ---------------------------------------------------------------------- UI --
 
-func _build_ask_dialog() -> void:
-	_ask_dialog = ConfirmationDialog.new()
-	_ask_dialog.title = "GitHub AutoPush"
-	_ask_dialog.dialog_text = "Vuoi caricare il progetto su GitHub prima di chiudere?"
-	_ask_dialog.ok_button_text = "Si, carica"
-	_ask_dialog.cancel_button_text = "No, chiudi"
-	_ask_dialog.confirmed.connect(_on_ask_confirmed)
-	_ask_dialog.canceled.connect(_on_ask_canceled)
-	EditorInterface.get_base_control().add_child(_ask_dialog)
+func _build_push_button() -> void:
+	_push_button = Button.new()
+	_push_button.text = BUTTON_TEXT
+	_push_button.tooltip_text = "Carica il progetto su GitHub (add, commit, push) e poi chiude Godot"
+	_push_button.flat = false
+	_push_button.pressed.connect(_on_push_and_close_pressed)
+	# lo metto nella barra in alto dell editor, accanto ai pulsanti Play/Pausa
+	
+	add_control_to_container(CONTAINER_TOOLBAR, _push_button)
 
 
 func _build_result_dialog() -> void:
@@ -197,10 +192,6 @@ func _build_settings_dialog() -> void:
 	_msg_edit = LineEdit.new()
 	vb.add_child(_msg_edit)
 
-	_ask_check = CheckBox.new()
-	_ask_check.text = "Chiedi di caricare quando chiudo l'editor"
-	vb.add_child(_ask_check)
-
 	_settings_dialog.add_child(vb)
 	EditorInterface.get_base_control().add_child(_settings_dialog)
 
@@ -215,7 +206,6 @@ func _open_settings() -> void:
 	_repo_edit.text = repo_url
 	_branch_edit.text = branch
 	_msg_edit.text = commit_message
-	_ask_check.button_pressed = ask_on_close
 	_settings_dialog.popup_centered()
 
 
@@ -225,7 +215,6 @@ func _on_settings_saved() -> void:
 	if branch == "":
 		branch = "main"
 	commit_message = _msg_edit.text
-	ask_on_close = _ask_check.button_pressed
 	_save_settings()
 
 
@@ -237,7 +226,6 @@ func _load_settings() -> void:
 		repo_url = cfg.get_value("github", "repo_url", "")
 		branch = cfg.get_value("github", "branch", "main")
 		commit_message = cfg.get_value("github", "commit_message", "Auto-commit da Godot")
-		ask_on_close = cfg.get_value("github", "ask_on_close", true)
 
 
 func _save_settings() -> void:
@@ -245,5 +233,4 @@ func _save_settings() -> void:
 	cfg.set_value("github", "repo_url", repo_url)
 	cfg.set_value("github", "branch", branch)
 	cfg.set_value("github", "commit_message", commit_message)
-	cfg.set_value("github", "ask_on_close", ask_on_close)
 	cfg.save(SETTINGS_PATH)
